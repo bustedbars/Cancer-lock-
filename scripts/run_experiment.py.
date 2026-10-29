@@ -1,0 +1,333 @@
+"""
+CancerLock: Real Cancer Mutation Experiment Runner
+
+Downloads public breast cancer mutation data from cBioPortal,
+analyzes mutation frequencies, and saves reproducible results.
+
+IMPORTANT:
+This is exploratory genomic analysis, not a clinical diagnosis
+or a validated treatment recommendation.
+"""
+
+import csv
+import json
+import os
+import sys
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+import httpx
+
+
+BASE_URL = "https://www.cbioportal.org/api"
+STUDY_ID = "brca_tcga"
+
+# Keep the first experiment manageable.
+MAX_SAMPLES = 50
+TOP_GENE_COUNT = 20
+
+ROOT = Path(__file__).resolve().parents[1]
+DATA_DIR = ROOT / "data"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def api_get(client, endpoint):
+    """GET a cBioPortal endpoint and return its JSON response."""
+    response = client.get(f"{BASE_URL}{endpoint}")
+    response.raise_for_status()
+    return response.json()
+
+
+def api_post(client, endpoint, payload):
+    """POST to a cBioPortal endpoint and return its JSON response."""
+    response = client.post(
+        f"{BASE_URL}{endpoint}",
+        json=payload,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def choose_mutation_profile(profiles):
+    """Find the study's mutation profile."""
+    candidates = [
+        profile
+        for profile in profiles
+        if "mutation" in profile.get("molecularAlterationType", "").lower()
+    ]
+
+    if not candidates:
+        raise RuntimeError(
+            "No mutation profile was found for this study."
+        )
+
+    # Prefer the canonical mutation profile when available.
+    candidates.sort(
+        key=lambda profile: (
+            "mutations" not in profile.get("molecularProfileId", "").lower(),
+            profile.get("molecularProfileId", ""),
+        )
+    )
+
+    return candidates[0]
+
+
+def choose_sample_list(sample_lists):
+    """Find a suitable sample list for mutation analysis."""
+    candidates = [
+        item
+        for item in sample_lists
+        if item.get("category") == "all_cases_with_mutation_data"
+    ]
+
+    if not candidates:
+        candidates = [
+            item
+            for item in sample_lists
+            if item.get("category") == "all_cases_in_study"
+        ]
+
+    if not candidates:
+        candidates = [
+            item
+            for item in sample_lists
+            if item.get("sampleListId", "").endswith("_all")
+        ]
+
+    if not candidates:
+        raise RuntimeError(
+            "No suitable sample list was found for this study."
+        )
+
+    return candidates[0]
+
+
+def download_mutations():
+    """Download a bounded set of public mutation records."""
+    with httpx.Client(
+        timeout=60.0,
+        follow_redirects=True,
+        headers={"Accept": "application/json"},
+    ) as client:
+        study = api_get(client, f"/studies/{STUDY_ID}")
+
+        profiles = api_get(
+            client,
+            f"/studies/{STUDY_ID}/molecular-profiles",
+        )
+
+        sample_lists = api_get(
+            client,
+            f"/studies/{STUDY_ID}/sample-lists",
+        )
+
+        profile = choose_mutation_profile(profiles)
+        sample_list = choose_sample_list(sample_lists)
+
+        sample_list_id = sample_list["sampleListId"]
+
+        sample_records = api_get(
+            client,
+            f"/sample-lists/{sample_list_id}/samples",
+        )
+
+        sample_ids = [
+            item.get("sampleId")
+            for item in sample_records
+            if item.get("sampleId")
+        ][:MAX_SAMPLES]
+
+        if not sample_ids:
+            raise RuntimeError(
+                "The selected sample list returned no sample IDs."
+            )
+
+        mutations = api_post(
+            client,
+            (
+                f"/molecular-profiles/"
+                f"{profile['molecularProfileId']}/mutations/fetch"
+            ),
+            {
+                "sampleIds": sample_ids,
+                "projection": "DETAILED",
+            },
+        )
+
+    if not isinstance(mutations, list):
+        raise RuntimeError(
+            "The mutation endpoint returned an unexpected response."
+        )
+
+    metadata = {
+        "study_id": STUDY_ID,
+        "study_name": study.get("name", STUDY_ID),
+        "molecular_profile_id": profile["molecularProfileId"],
+        "sample_list_id": sample_list_id,
+        "samples_requested": len(sample_ids),
+        "mutation_records_returned": len(mutations),
+        "downloaded_at_utc": datetime.now(
+            timezone.utc
+        ).isoformat(),
+        "source": BASE_URL,
+    }
+
+    return metadata, mutations
+
+
+def summarize_mutations(metadata, mutations):
+    """Calculate mutation counts without claiming clinical significance."""
+    gene_counts = Counter()
+    mutation_type_counts = Counter()
+    sample_counts = Counter()
+
+    for mutation in mutations:
+        gene = (
+            mutation.get("hugSymbol")
+            or mutation.get("gene", {}).get("hugoGeneSymbol")
+            or mutation.get("geneSymbol")
+            or "UNKNOWN"
+        )
+
+        mutation_type = (
+            mutation.get("mutationType")
+            or mutation.get("variantType")
+            or "UNSPECIFIED"
+        )
+
+        sample_id = mutation.get("sampleId")
+
+        gene_counts[gene] += 1
+        mutation_type_counts[mutation_type] += 1
+
+        if sample_id:
+            sample_counts[sample_id] += 1
+
+    summary = {
+        **metadata,
+        "unique_mutated_genes": len(gene_counts),
+        "samples_with_returned_mutations": len(sample_counts),
+        "mutation_type_counts": dict(
+            mutation_type_counts.most_common()
+        ),
+        "top_mutated_genes": [
+            {"gene": gene, "mutation_records": count}
+            for gene, count in gene_counts.most_common(
+                TOP_GENE_COUNT
+            )
+        ],
+        "interpretation_limitations": [
+            (
+                "Mutation-record counts are not necessarily the number "
+                "of patients with a mutation in each gene."
+            ),
+            (
+                "Frequently mutated genes are not automatically "
+                "effective treatment targets."
+            ),
+            (
+                "Mutation data alone do not establish causal pathway "
+                "disruption or treatment effectiveness."
+            ),
+            (
+                "The dataset is a research cohort and is not a "
+                "representative sample of every cancer patient."
+            ),
+        ],
+    }
+
+    return summary, gene_counts
+
+
+def save_results(metadata, mutations, summary, gene_counts):
+    """Save raw research records and analysis outputs."""
+    raw_path = DATA_DIR / "raw_mutations.json"
+    summary_path = DATA_DIR / "mutation_summary.json"
+    csv_path = DATA_DIR / "top_mutated_genes.csv"
+
+    with raw_path.open("w", encoding="utf-8") as file:
+        json.dump(
+            {
+                "metadata": metadata,
+                "mutations": mutations,
+            },
+            file,
+            indent=2,
+        )
+
+    with summary_path.open("w", encoding="utf-8") as file:
+        json.dump(summary, file, indent=2)
+
+    with csv_path.open(
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as file:
+        writer = csv.writer(file)
+        writer.writerow(["gene", "mutation_records"])
+
+        for gene, count in gene_counts.most_common():
+            writer.writerow([gene, count])
+
+    return raw_path, summary_path, csv_path
+
+
+def main():
+    print("=" * 60)
+    print("CANCERLOCK | REAL MUTATION DATA EXPERIMENT")
+    print("=" * 60)
+    print(f"Study: {STUDY_ID}")
+    print(f"Maximum samples requested: {MAX_SAMPLES}")
+    print("Connecting to cBioPortal...")
+
+    try:
+        metadata, mutations = download_mutations()
+
+        summary, gene_counts = summarize_mutations(
+            metadata,
+            mutations,
+        )
+
+        paths = save_results(
+            metadata,
+            mutations,
+            summary,
+            gene_counts,
+        )
+
+    except (httpx.HTTPError, RuntimeError, KeyError, ValueError) as exc:
+        print(f"\nEXPERIMENT FAILED: {exc}", file=sys.stderr)
+        print(
+            "No successful analysis is being reported. "
+            "Check the study/profile availability and API response."
+        )
+        sys.exit(1)
+
+    print("\nDOWNLOAD AND ANALYSIS COMPLETED")
+    print(f"Study: {metadata['study_name']}")
+    print(f"Samples requested: {metadata['samples_requested']}")
+    print(f"Mutation records: {len(mutations)}")
+    print(f"Unique mutated genes: {summary['unique_mutated_genes']}")
+
+    print("\nTOP MUTATED GENES")
+    for item in summary["top_mutated_genes"]:
+        print(
+            f"  {item['gene']}: "
+            f"{item['mutation_records']} mutation records"
+        )
+
+    print("\nSAVED FILES")
+    for path in paths:
+        print(f"  {path.relative_to(ROOT)}")
+
+    print(
+        "\nNEXT: validate the mutation data, connect genes to "
+        "documented biological interactions, and define an objective "
+        "for evaluating ARIDAQ optimization."
+    )
+
+
+if __name__ == "__main__":
+    main()
