@@ -1,90 +1,130 @@
-import os
 
+from typing import Any
+
+import networkx as nx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from app.meta_model import explain_experiment, MetaModelError
-
+from app.aridaq_optimizer import (
+    ARIDAQConfig,
+    ARIDAQError,
+    ARIDAQOptimizer,
+)
 
 app = FastAPI(
     title="CancerLock API",
-    description=(
-        "Computational cancer biology research using "
-        "ARIDAQ and AI-assisted experiment explanations."
-    ),
-    version="0.1.0",
+    description="Research API for cancer network optimization.",
+    version="0.2.0",
 )
 
 
+class NodeInput(BaseModel):
+    id: str
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+
+class EdgeInput(BaseModel):
+    source: str
+    target: str
+    attributes: dict[str, Any] = Field(default_factory=dict)
+
+
+class OptimizeRequest(BaseModel):
+    nodes: list[NodeInput]
+    edges: list[EdgeInput]
+    source: str
+    target: str
+    directed: bool = False
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
 class ExperimentRequest(BaseModel):
-    experiment_data: dict = Field(
-        ...,
-        description="Results from a CancerLock experiment.",
-    )
-    question: str = Field(
-        default="Explain these results and their limitations.",
-        min_length=3,
-        max_length=1000,
+    experiment_data: dict[str, Any]
+    question: str = (
+        "Analyze these results, including biological "
+        "meaning, limitations, and next steps."
     )
 
 
 @app.get("/")
-def root():
+def home():
     return {
-        "name": "CancerLock API",
+        "project": "CancerLock",
         "status": "running",
-        "version": "0.1.0",
-        "endpoints": [
-            "/health",
-            "/explain",
-            "/docs",
-        ],
+        "version": "0.2.0",
     }
 
 
 @app.get("/health")
 def health():
-    return {
-        "status": "healthy",
-        "meta_api_key_configured": bool(
-            os.getenv("MODEL_API_KEY")
-        ),
-    }
+    return {"status": "healthy"}
 
 
-@app.post("/explain")
-def explain(request: ExperimentRequest):
-    """Explain supplied experiment results using Meta's model."""
-
+@app.post("/optimize")
+def optimize(request: OptimizeRequest):
     try:
+        graph_type = nx.DiGraph if request.directed else nx.Graph
+        graph = graph_type()
+
+        for node in request.nodes:
+            graph.add_node(node.id, **node.attributes)
+
+        for edge in request.edges:
+            if edge.source not in graph or edge.target not in graph:
+                raise ARIDAQError(
+                    "Every edge must reference existing nodes."
+                )
+
+            graph.add_edge(
+                edge.source,
+                edge.target,
+                **edge.attributes,
+            )
+
+        config = ARIDAQConfig(**request.config)
+        optimizer = ARIDAQOptimizer(config)
+
+        result = optimizer.optimize(
+            graph,
+            request.source,
+            request.target,
+        )
+
+        return {
+            "project": "CancerLock",
+            "engine": "ARIDAQ",
+            "result": result,
+            "interpretation": (
+                "This is an energy-informed graph-search result, "
+                "not a clinically validated treatment recommendation."
+            ),
+        }
+
+    except ARIDAQError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+
+@app.post("/analyze")
+def analyze(request: ExperimentRequest):
+    try:
+        from app.meta_model import explain_experiment
+
         result = explain_experiment(
             experiment_data=request.experiment_data,
             question=request.question,
         )
-        return result
 
-    except MetaModelError as exc:
-        message = str(exc)
+        return {
+            "project": "CancerLock",
+            "engine": "Meta Model API",
+            "analysis": result,
+        }
 
-        if "missing" in message.lower() or "not configured" in message.lower():
-            raise HTTPException(
-                status_code=503,
-                detail="Meta API credentials are not configured.",
-            )
-
-        if "HTTP 401" in message or "HTTP 403" in message:
-            raise HTTPException(
-                status_code=502,
-                detail="Meta API authentication failed or access was denied.",
-            )
-
-        if "HTTP 429" in message:
-            raise HTTPException(
-                status_code=503,
-                detail="Meta API rate limit or usage limit reached.",
-            )
-
+    except Exception as exc:
         raise HTTPException(
             status_code=502,
-            detail=message,
-        ) 
+            detail=f"Analysis request failed: {str(exc)}",
+        )
