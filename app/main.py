@@ -1,3 +1,54 @@
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import networkx as nx
+# Assuming your optimizer class is saved in a file named aridaq.py, or paste it right above!
+# from aridaq import ARIDAQOptimizer, ARIDAQConfig, ARIDAQError
+
+app = FastAPI(title="CancerLock API 🧬")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class OptimizationRequest(BaseModel):
+    source_node: str
+    target_node: str
+    # You can pass nodes/edges or configure graph inputs here
+
+@app.post("/api/optimize")
+def run_cancer_optimization(data: OptimizationRequest):
+    try:
+        # Build a mock dynamic graph using your engine metrics (DepMap / Patient data simulation)
+        G = nx.Graph()
+        
+        # Adding sample oncogenic states/transitions (e.g., TP53 mutation pathways)
+        G.add_node("Node_A", energy_low=2.1, energy_high=5.4)
+        G.add_node("Node_B", energy_low=1.5, energy_high=4.2)
+        G.add_node("Node_C", energy_low=0.8, energy_high=2.9)
+        
+        G.add_edge("Node_A", "Node_B", distance_nm=1.2, charge_i=1.0, charge_j=-1.0, energy_low=2.0, energy_high=4.0, friction=0.2)
+        G.add_edge("Node_B", "Node_C", distance_nm=0.9, charge_i=-1.0, charge_j=1.0, energy_low=1.0, energy_high=3.0, friction=0.1)
+
+        optimizer = ARIDAQOptimizer()
+        result = optimizer.optimize(G, data.source_node, data.target_node)
+        
+        return {
+            "status": "success",
+            "project": "CancerLock",
+            "optimization_results": result,
+            "clinical_note": "Route optimized for biomedical engineering target delivery."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str.error(e) if hasattr(e, 'error') else str(e))
+
+@app.get("/")
+def health_check():
+    return {"status": "CancerLock API is online and optimizing 🚀"}
 
 from typing import Any
 
