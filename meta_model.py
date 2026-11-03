@@ -1,4 +1,6 @@
+
 import os
+import json
 import httpx
 
 
@@ -11,17 +13,36 @@ class MetaModelError(Exception):
     pass
 
 
+SYSTEM_INSTRUCTIONS = """
+You are the biological reasoning and research intelligence
+component of CancerLock.
+
+Your responsibilities:
+1. Interpret supplied cancer biology research data.
+2. Identify relevant survival pathways and biological relationships.
+3. Investigate potential resistance mechanisms.
+4. Explain optimization results produced by Aridaq.
+5. Identify uncertainties and missing evidence.
+6. Suggest scientifically testable follow-up experiments.
+
+Rules:
+- Never invent biological data or gene interactions.
+- Never claim a simulation or experiment was performed if it was not.
+- Distinguish established evidence from hypotheses.
+- Never present computational predictions as proven treatments.
+- Consider healthy-cell selectivity and potential resistance.
+- Clearly communicate scientific limitations.
+"""
+
+
 def explain_experiment(
     experiment_data: dict,
     question: str = (
-        "Explain these CancerLock experiment results, "
-        "including limitations and possible next steps."
+        "Analyze these CancerLock research results. "
+        "Explain biological significance, resistance risks, "
+        "healthy-cell considerations, limitations and next steps."
     ),
 ) -> str:
-    """
-    Ask Meta's model to interpret experiment data.
-    This function does not run the ARIDAQ algorithm.
-    """
 
     api_key = os.getenv("MODEL_API_KEY")
     model = os.getenv("MODEL_NAME", DEFAULT_MODEL)
@@ -31,66 +52,76 @@ def explain_experiment(
             "MODEL_API_KEY is not configured."
         )
 
+    if not isinstance(experiment_data, dict):
+        raise MetaModelError(
+            "Experiment data must be a dictionary."
+        )
+
+    try:
+        serialized_data = json.dumps(
+            experiment_data,
+            indent=2,
+            allow_nan=False
+        )
+    except (TypeError, ValueError) as exc:
+        raise MetaModelError(
+            "Experiment data must contain valid JSON-compatible values."
+        ) from exc
+
     payload = {
         "model": model,
         "messages": [
             {
-                "role": "system",
-                "content": (
-                    "You are the scientific explanation component "
-                    "of CancerLock, an exploratory computational "
-                    "cancer-biology research prototype. "
-                    "Explain supplied results accurately. "
-                    "Never invent data, claim an experiment ran "
-                    "when it did not, or present predictions as "
-                    "proven treatments. Clearly state limitations."
-                ),
+                "role": "developer",
+                "content": SYSTEM_INSTRUCTIONS
             },
             {
                 "role": "user",
                 "content": (
-                    f"Experiment data:\n{experiment_data}\n\n"
-                    f"Question:\n{question}"
-                ),
-            },
+                    f"EXPERIMENT DATA:\n{serialized_data}\n\n"
+                    f"RESEARCH QUESTION:\n{question}"
+                )
+            }
         ],
-        "temperature": 0.2,
-        "max_tokens": 1200,
+        "max_completion_tokens": 1500
     }
 
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=90.0) as client:
             response = client.post(
                 API_URL,
                 headers={
                     "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
+                    "Content-Type": "application/json"
                 },
-                json=payload,
+                json=payload
             )
 
-        if response.is_error:
-            raise MetaModelError(
-                f"Meta API returned HTTP {response.status_code}: "
-                f"{response.text[:500]}"
-            )
+            response.raise_for_status()
 
         result = response.json()
+
         answer = result["choices"][0]["message"]["content"]
 
-        if not answer:
+        if not isinstance(answer, str) or not answer.strip():
             raise MetaModelError(
-                "The Meta API returned an empty response."
+                "Meta returned an empty or invalid response."
             )
 
         return answer.strip()
 
+    except httpx.HTTPStatusError as exc:
+        raise MetaModelError(
+            f"Meta API error {exc.response.status_code}: "
+            f"{exc.response.text[:500]}"
+        ) from exc
+
     except httpx.RequestError as exc:
         raise MetaModelError(
-            f"Could not connect to Meta API: {exc}"
+            f"Meta connection failed: {exc}"
         ) from exc
 
     except (KeyError, IndexError, TypeError, ValueError) as exc:
         raise MetaModelError(
-            "The Meta API returned an unexpected response."
+            "Meta returned an unexpected response format."
         ) from exc
