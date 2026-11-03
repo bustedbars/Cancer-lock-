@@ -179,3 +179,51 @@ def analyze(request: ExperimentRequest):
             status_code=502,
             detail=f"Analysis request failed: {str(exc)}",
         )
+import os
+from openai import OpenAI
+
+# Initialize the client pointing to Meta's Model API
+# (It uses OpenAI-compatible routing under the hood)
+meta_client = OpenAI(
+    api_key=os.environ.get("MODEL_API_KEY"),
+    base_url="https://api.meta.ai/v1"
+)
+
+@app.post("/api/ai-clinical-insights")
+def get_meta_ai_insights(node_name: str, optimization_cost: float):
+    try:
+        # Prompting Meta's Muse model (e.g., Muse Wonder or Muse Spark) for doctor-ready notes
+        response = meta_client.chat.completions.create(
+            model="muse-spark-1.3",  # Or muse-wonder-1.0
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "You are an expert oncology clinical assistant helping biomedical engineers interpret non-Euclidean graph optimization paths."
+                },
+                {
+                    "role": "user", 
+                    "content": f"Analyze target node {node_name} with an energy optimization cost of {optimization_cost}. Provide 3 critical clinical takeaways for a doctor."
+                }
+            ],
+            max_tokens=300
+        ]
+        
+        return {
+            "status": "success",
+            "ai_insights": response.choices[0].message.content
+        }
+    except Exception as e:
+        return {"error": str(e)}
+": f"Analyze target node {node_name} with an energy optimization cost of {optimization_cost}. Provide 3 critical clinical takeaways for a doctor."
+                }
+            ],
+            max_tokens=300
+        ]
+        
+        return {
+            "status": "success",
+            "ai_insights": response.choices[0].message.content
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
