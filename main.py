@@ -193,7 +193,7 @@ meta_client = OpenAI(
 def get_meta_ai_insights(node_name: str, optimization_cost: float):
     try:
         # Prompting Meta's Muse model (e.g., Muse Wonder or Muse Spark) for doctor-ready notes
-        response = meta_client.chat.completions.create(
+        response = meta_client.chat.completions.create
             model="muse-spark-1.3",  # Or muse-wonder-1.0
             messages=[
                 {
