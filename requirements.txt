@@ -11,3 +11,5 @@ pytest
 openai
 networkx
 streamlit
+dataclass
+json
